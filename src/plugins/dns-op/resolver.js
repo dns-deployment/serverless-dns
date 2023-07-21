@@ -13,6 +13,7 @@ import * as dnsutil from "../../commons/dnsutil.js";
 import * as bufutil from "../../commons/bufutil.js";
 import * as util from "../../commons/util.js";
 import * as envutil from "../../commons/envutil.js";
+import { BlocklistFilter } from "../rethinkdns/filter.js";
 
 export default class DNSResolver {
   /**
@@ -68,10 +69,11 @@ export default class DNSResolver {
       this.log.i("imported node-util");
     }
     if (isnode && !this.transport) {
-      // awaiting on dns-transport takes a tad longer that more than 1 event
-      // awaiting lazyInit() trigger this part of the code and end up
-      // initializing multiple transports. This reproduces easily when 100+
-      // requests arrive at once.
+      // awaiting on dns-transport may take more than 1 micro tick;
+      // and so, multiple concurrent awaits on lazyInit() ends up
+      // initializing multiple transports (ex, when 100+
+      // requests arrive at once). Hence the need to check if
+      // the transport is already set / not null.
       const dnst = await import("../../core/node/dns-transport.js");
       if (this.transport == null) {
         this.transport = dnst.makeTransport(plainOldDnsIp, 53);
@@ -162,6 +164,7 @@ export default class DNSResolver {
    * @param {Object} ctx.userBlocklistInfo
    * @param {String} ctx.userDnsResolverUrl
    * @param {string} ctx.userBlockstamp
+   * @param {pres.BStamp?} ctx.domainBlockstamp
    * @param {function(function):void} ctx.dispatcher
    * @returns {Promise<pres.RResp>}
    */
@@ -294,6 +297,13 @@ export default class DNSResolver {
     return r;
   }
 
+  /**
+   * @param {string} rxid
+   * @param {ArrayBuffer} raw
+   * @param {BlocklistFilter} blf
+   * @param {pres.BStamp?} stamps
+   * @returns
+   */
   async makeRdnsResponse(rxid, raw, blf, stamps = null) {
     if (!raw) throw new Error(rxid + " mk-res no upstream result");
 
@@ -309,7 +319,13 @@ export default class DNSResolver {
     return pres.dnsResponse(dnsPacket, raw, stamps);
   }
 
-  primeCache(rxid, r, dispatcher) {
+  /**
+   * @param {string} rxid
+   * @param {pres.RespData} r
+   * @param {function(function):void} dispatcher
+   * @returns {Promise<void>}
+   */
+  async primeCache(rxid, r, dispatcher) {
     const blocked = r.isBlocked;
 
     const k = cacheutil.makeHttpCacheKey(r.dnsPacket);
@@ -327,6 +343,7 @@ export default class DNSResolver {
   }
 
   ofMax(blockstamp) {
+    if (util.emptyString(this.maxDoh)) return "";
     if (util.emptyString(blockstamp)) return this.maxDoh;
     else return this.maxDoh + blockstamp;
   }
@@ -508,7 +525,7 @@ DNSResolver.prototype.doh2 = async function (rxid, request) {
       req.on("end", () => {
         const rb = bufutil.concatBuf(b);
         const h = this.nodeutil.transformPseudoHeaders(headers);
-        util.safeBox(() => c.close());
+        c.close();
         resolve(new Response(rb, h));
       });
     });

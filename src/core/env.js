@@ -52,11 +52,6 @@ const defaults = new Map(
       // also ref: EnvManager.mostLikelyCloudPlatform()
       default: "local",
     },
-    // timeout for proc running on fly machines
-    MACHINES_TIMEOUT_SEC: {
-      type: "number",
-      default: -1,
-    },
     // download blocklist files to disk, if any, and quit
     BLOCKLIST_DOWNLOAD_ONLY: {
       type: "boolean",
@@ -193,6 +188,10 @@ const defaults = new Map(
     },
     // use only doh upstream on nodejs (udp/tcp is the default on nodejs)
     NODE_DOH_ONLY: {
+      type: "boolean",
+      default: false,
+    },
+    LOGPUSH_ENABLED: {
       type: "boolean",
       default: false,
     },

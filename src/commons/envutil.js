@@ -14,20 +14,6 @@ export function onFly() {
   return envManager.get("CLOUD_PLATFORM") === "fly";
 }
 
-export function machinesTimeoutMillis() {
-  if (!envManager) return -1;
-
-  return envManager.get("MACHINES_TIMEOUT_SEC") * 1000;
-}
-
-// only valid on Fly Machines
-export function httpCheck() {
-  if (!envManager) return false;
-  if (!onFly()) return false;
-
-  return envManager.get("MACHINES_TIMEOUT_SEC") > 0;
-}
-
 export function onDenoDeploy() {
   if (!envManager) return false;
 
@@ -169,13 +155,13 @@ export function tlsKeyPath() {
 }
 
 export function tlsCrt() {
-  if (!envManager) return "";
-  return envManager.get("TLS_CRT") || "";
+  if (!envManager) return null;
+  return envManager.get("TLS_CRT") || null;
 }
 
 export function tlsKey() {
-  if (!envManager) return "";
-  return envManager.get("TLS_KEY") || "";
+  if (!envManager) return null;
+  return envManager.get("TLS_KEY") || null;
 }
 
 export function cacheTtl() {
@@ -195,6 +181,58 @@ export function isCleartext() {
   // when connecting to <appname>.fly.dev domains, fly.io edge handles tls;
   // and so, conns from fly.io edge to app is in cleartext
   return envManager.get("TLS_OFFLOAD") || false;
+}
+
+// sysctl get net.ipv4.tcp_syn_backlog
+export function tcpBacklog() {
+  if (!envManager) return 100;
+
+  return envManager.get("TCP_BACKLOG") || 100;
+}
+
+// don't forget to update the fly.toml too
+export function maxconns() {
+  if (!envManager) return 1000;
+
+  return envManager.get("MAXCONNS") || 1000;
+}
+
+export function minconns() {
+  if (!envManager) return 50;
+
+  return envManager.get("MINCONNS") || 50;
+}
+
+export function ioTimeoutMs(missing = 0) {
+  if (!envManager) return missing;
+
+  return envManager.get("WORKER_TIMEOUT") || missing;
+}
+
+export function shutdownTimeoutMs() {
+  if (!envManager) return 60 * 1000;
+
+  return envManager.get("SHUTDOWN_TIMEOUT_MS") || 60 * 1000;
+}
+
+export function measureHeap() {
+  // disable; webpack can't bundle memwatch; see: server-node.js
+  return false;
+  if (!envManager) return false;
+  const reg = region();
+  if (
+    reg === "maa" ||
+    reg === "sin" ||
+    reg === "fra" ||
+    reg === "ams" ||
+    reg === "lhr" ||
+    reg === "cdg" ||
+    reg === "iad" ||
+    reg === "mia"
+  ) {
+    return true;
+  }
+  return envManager.get("MEASURE_HEAP") || false;
 }
 
 export function blocklistDownloadOnly() {
@@ -233,6 +271,19 @@ export function profileDnsResolves() {
   if (!envManager) return false;
 
   return envManager.get("PROFILE_DNS_RESOLVES") || false;
+}
+
+export function imageRef() {
+  if (!envManager) return "";
+  if (!onFly()) return "";
+
+  return envManager.get("FLY_IMAGE_REF") || "";
+}
+
+export function secretb64() {
+  if (!envManager) return null;
+
+  return envManager.get("TOP_SECRET_512_B64") || null;
 }
 
 export function accessKeys() {
@@ -286,6 +337,12 @@ export function recursive() {
   return onFly();
 }
 
+export function logpushEnabled() {
+  if (!envManager) return false;
+
+  return envManager.get("LOGPUSH_ENABLED") || false;
+}
+
 export function logpushHostnameAsLogid() {
   if (!envManager) return false;
 
@@ -330,14 +387,17 @@ export function logpushSecretKey() {
 }
 
 export function gwip4() {
+  if (!envManager) return "";
   return envManager.get("GW_IP4") || "";
 }
 
 export function gwip6() {
+  if (!envManager) return "";
   return envManager.get("GW_IP6") || "";
 }
 
 export function region() {
+  if (!envManager) return "";
   return envManager.get("FLY_REGION") || "";
 }
 

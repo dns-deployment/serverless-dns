@@ -9,6 +9,7 @@ import * as cfg from "../core/cfg.js";
 import * as util from "../commons/util.js";
 import * as dnsutil from "../commons/dnsutil.js";
 import * as envutil from "../commons/envutil.js";
+import * as pres from "./plugin-response.js";
 
 const minTtlSec = 30; // 30s
 const maxTtlSec = 180; // 3m
@@ -43,6 +44,11 @@ function determineCacheExpiry(packet) {
   return expiry;
 }
 
+/**
+ * @param {any} dnsPacket
+ * @param {pres.BStamp} stamps
+ * @returns {DnsCacheMetadata}
+ */
 function makeCacheMetadata(dnsPacket, stamps) {
   // {
   //   "expiry": 1642874536022,
@@ -52,25 +58,50 @@ function makeCacheMetadata(dnsPacket, stamps) {
   //     "rewrite.amazon.com": [944,32768,8,16384,16,16]
   //   }
   // }
-  return {
-    expiry: determineCacheExpiry(dnsPacket),
-    stamps: stamps,
-  };
+  return new DnsCacheMetadata(determineCacheExpiry(dnsPacket), stamps);
 }
 
+export class DnsCacheMetadata {
+  constructor(expiry, stamps) {
+    /** @type {number} */
+    this.expiry = expiry;
+    /** @type {pres.BStamp} */
+    this.stamps = stamps;
+  }
+}
+
+export class DnsCacheData {
+  constructor(packet, raw, metadata) {
+    /** @type {any} */
+    this.dnsPacket = packet; // may be null
+    /** @type {ArrayBuffer} */
+    this.dnsBuffer = raw;
+    /** @type {DnsCacheMetadata} */
+    this.metadata = metadata;
+  }
+}
+
+/**
+ * @param {any} packet
+ * @param {ArrayBuffer?} raw
+ * @param {DnsCacheMetadata} metadata
+ * @returns {DnsCacheData}
+ */
 export function makeCacheValue(packet, raw, metadata) {
   // null value allowed for packet / raw
-  return {
-    dnsPacket: packet,
-    dnsBuffer: raw,
-    metadata: metadata,
-  };
+  return new DnsCacheData(packet, raw, metadata);
 }
 
+/**
+ * @param {pres.RespData} rdnsResponse
+ * @returns {DnsCacheData}
+ */
 export function cacheValueOf(rdnsResponse) {
   const stamps = rdnsResponse.stamps;
-  const packet = rdnsResponse.dnsPacket;
-  const raw = rdnsResponse.dnsBuffer;
+  // do not cache OPT records
+  // github.com/bluejekyll/trust-dns/blob/a614257fb0/crates/proto/src/rr/rdata/opt.rs#L46-L52
+  const [packet, modified] = dnsutil.dropOPT(rdnsResponse.dnsPacket);
+  const raw = modified ? dnsutil.encode(packet) : rdnsResponse.dnsBuffer;
 
   const metadata = makeCacheMetadata(packet, stamps);
   return makeCacheValue(packet, raw, metadata);
@@ -96,14 +127,24 @@ function makeId(packet) {
   return dnsutil.normalizeName(q.name) + ":" + q.type + addn;
 }
 
-export function makeLocalCacheValue(b, metadata) {
-  return {
-    dnsBuffer: b,
-    metadata: metadata,
-  };
+/**
+ * @param {DnsCacheData} data
+ * @returns {DnsCacheData}
+ */
+export function makeLocalCacheValue(data) {
+  const b = data.dnsBuffer;
+  const metadata = data.metadata;
+  // ensure dnsPacket is null
+  return new DnsCacheData(null, b, metadata);
 }
 
-export function makeHttpCacheValue(b, metadata) {
+/**
+ * @param {DnsCacheData} data
+ * @returns {Response}
+ */
+export function makeHttpCacheValue(data) {
+  const b = data.dnsBuffer;
+  const metadata = data.metadata;
   const headers = {
     headers: util.concatHeaders(
       {
@@ -121,17 +162,30 @@ export function makeHttpCacheValue(b, metadata) {
   return new Response(b, headers);
 }
 
+/**
+ * @param {any} packet
+ * @returns {URL}
+ */
 export function makeHttpCacheKey(packet) {
-  const id = makeId(packet);
+  const id = makeId(packet); // ex: domain.tld:A:dnssec
   if (util.emptyString(id)) return null;
 
   return new URL(_cacheurl + cfg.timestamp() + "/" + id);
 }
 
+/**
+ * @param {Response} cres
+ * @returns {DnsCacheMetadata}
+ */
 export function extractMetadata(cres) {
-  return JSON.parse(cres.headers.get(cheader));
+  const j = JSON.parse(cres.headers.get(cheader));
+  return new DnsCacheMetadata(j.expiry, j.stamps);
 }
 
+/**
+ * @param {DnsCacheMetadata} m
+ * @returns {string}
+ */
 function embedMetadata(m) {
   return JSON.stringify(m);
 }
@@ -151,12 +205,20 @@ export function updateQueryId(decodedDnsPacket, queryId) {
   return true;
 }
 
+/**
+ * @param {DnsCacheData} v
+ * @returns {boolean}
+ */
 export function isValueValid(v) {
   if (util.emptyObj(v)) return false;
 
   return hasMetadata(v.metadata);
 }
 
+/**
+ * @param {DnsCacheMetadata} m
+ * @returns {boolean}
+ */
 export function hasMetadata(m) {
   return !util.emptyObj(m);
 }
