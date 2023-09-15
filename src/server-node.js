@@ -6,12 +6,12 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 
-import net, { isIPv6 } from "net";
-import * as tls from "tls";
-import http2 from "http2";
+import net, { isIPv6 } from "node:net";
+import * as tls from "node:tls";
+import http2 from "node:http2";
 import * as h2c from "httpx-server";
-import * as os from "os";
-import v8 from "v8";
+import * as os from "node:os";
+import v8 from "node:v8";
 import { V2ProxyProtocol } from "proxy-protocol-js";
 import * as system from "./system.js";
 import { handleRequest } from "./core/doh.js";
@@ -22,7 +22,7 @@ import * as envutil from "./commons/envutil.js";
 import * as nodeutil from "./core/node/util.js";
 import * as util from "./commons/util.js";
 import "./core/node/config.js";
-import { finished } from "stream";
+import { finished } from "node:stream";
 import * as nodecrypto from "./commons/crypto.js";
 // webpack can't handle node-bindings, a dependency of node-memwatch
 // github.com/webpack/webpack/issues/16029
@@ -48,6 +48,7 @@ class Stats {
     this.tlserr = 0;
     this.nofdrops = 0;
     this.nofconns = 0;
+    this.openconns = 0;
     this.noftimeouts = 0;
     // avg1, avg5, avg15, adj, maxconns
     this.bp = [0, 0, 0, 0, 0];
@@ -56,7 +57,7 @@ class Stats {
   str() {
     return (
       `reqs=${this.noreqs} checks=${this.nofchecks} ` +
-      `drops=${this.nofdrops}/tot=${this.nofconns} ` +
+      `drops=${this.nofdrops}/tot=${this.nofconns}/open=${this.openconns} ` +
       `timeouts=${this.noftimeouts}/tlserr=${this.tlserr} ` +
       `n=${this.bp[4]}/adj=${this.bp[3]} ` +
       `load=${this.bp[0]}/${this.bp[1]}/${this.bp[2]}`
@@ -355,6 +356,7 @@ function trapServerEvents(s) {
 
   s.on("connection", (/** @type {Socket} */ socket) => {
     stats.nofconns += 1;
+    stats.openconns += 1;
 
     const id = tracker.trackConn(s, socket);
     if (!tracker.valid(id)) {
@@ -377,6 +379,10 @@ function trapServerEvents(s) {
     socket.on("end", () => {
       // TODO: is this needed? this is the default anyway
       socket.end();
+    });
+
+    socket.on("close", () => {
+      stats.openconns -= 1;
     });
   });
 
@@ -405,6 +411,7 @@ function trapSecureServerEvents(s) {
   // github.com/grpc/grpc-node/blob/e6ea6f517epackages/grpc-js/src/server.ts#L392
   s.on("secureConnection", (socket) => {
     stats.nofconns += 1;
+    stats.openconns += 1;
 
     const id = tracker.trackConn(s, socket);
     if (!tracker.valid(id)) {
@@ -430,6 +437,10 @@ function trapSecureServerEvents(s) {
       // client gone, socket half-open at this point
       // close this end of the socket, too
       socket.end();
+    });
+
+    socket.on("close", () => {
+      stats.openconns -= 1;
     });
   });
 
@@ -1072,8 +1083,10 @@ function heartbeat() {
 }
 
 function adjustMaxConns(n) {
+  const isNode = envutil.isNode();
   const maxc = envutil.maxconns();
   const minc = envutil.minconns();
+  const adjsPerSec = 60 / adjPeriodSec;
 
   // caveats:
   // linux-magazine.com/content/download/62593/485442/version/1/file/Load_Average.pdf
@@ -1086,7 +1099,7 @@ function adjustMaxConns(n) {
 
   let adj = stats.bp[3] || 0;
   // increase in load
-  if (avg5 > 100) {
+  if (avg5 > 90) {
     adj += 3;
   } else if (avg1 > 100) {
     adj += 2;
@@ -1105,8 +1118,10 @@ function adjustMaxConns(n) {
     } else if (avg1 > 70) {
       n = Math.max((n * 0.6) | 0, minc);
     } else {
-      // reset; n reverting back to maxconns
-      adj = 0;
+      // reclaim adjs 25% at a time as n approaches maxconns
+      // ex: if adj is 100, then the decay would be,
+      // [75, 56, 42, 31, 23, 17, 12, 9, 6, 4, 3, 2, 1, 0]
+      adj = Math.max(0, adj * 0.75) | 0;
     }
   } else {
     // clamp n based on a preset
@@ -1117,24 +1132,25 @@ function adjustMaxConns(n) {
   }
 
   // adjustMaxConns is called every adjPeriodSec
-  const breakpoint = 15 * (60 / adjPeriodSec); // 15 mins
-  const stresspoint = 10 * (60 / adjPeriodSec); // 10 mins
+  const breakpoint = 10 * adjsPerSec; // 10 mins
+  const stresspoint = 5 * adjsPerSec; // 5 mins
+  const nstr = stats.openconns + "/" + n;
   if (adj > breakpoint) {
-    log.w("load: stopping; n:", n, "adjs:", adj);
+    log.w("load: stopping; n:", nstr, "adjs:", adj);
     stopAfter(0);
     return;
   } else if (adj > stresspoint) {
-    log.w("load: stress; n:", n, "adjs:", adj, "avgs:", avg1, avg5, avg15);
+    log.w("load: stress; n:", nstr, "adjs:", adj, "avgs:", avg1, avg5, avg15);
     n = (minc / 2) | 0;
   } else if (adj > 0) {
-    log.d("load: high; n:", n, "adjs:", adj, "avgs:", avg1, avg5, avg15);
+    log.d("load: high; n:", nstr, "adjs:", adj, "avgs:", avg1, avg5, avg15);
   }
 
   // nodejs.org/en/docs/guides/diagnostics/memory/using-gc-traces
   if (adj > 0) {
-    v8.setFlagsFromString("--trace-gc");
+    if (isNode) v8.setFlagsFromString("--trace-gc");
   } else {
-    v8.setFlagsFromString("--notrace-gc");
+    if (isNode) v8.setFlagsFromString("--notrace-gc");
   }
 
   stats.bp = [avg1, avg5, avg15, adj, n];
